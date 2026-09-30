@@ -1,5 +1,33 @@
 #!/bin/bash
 export LANG=en_US.UTF-8
+
+# FreeBSD compatibility
+OS=$(uname -s)
+if [ "$OS" = "FreeBSD" ]; then
+    FREEBSD=yes
+    sed_i() { sed -i '' "$@"; }
+    rand_port() {
+        if command -v shuf >/dev/null 2>&1; then
+            shuf -i 10000-65535 -n 1
+        elif command -v jot >/dev/null 2>&1; then
+            jot -r 1 10000 65535
+        else
+            awk 'BEGIN{srand(); print int(10000+rand()*55536)}'
+        fi
+    }
+    sha256_cmd() {
+        if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum
+        else
+            sha256 -q
+        fi
+    }
+else
+    FREEBSD=no
+    sed_i() { sed -i "$@"; }
+    rand_port() { shuf -i 10000-65535 -n 1; }
+    sha256_cmd() { sha256sum; }
+fi
 [ -z "${vlpt+x}" ] || vlp=yes
 [ -z "${vmpt+x}" ] || { vmp=yes; vmag=yes; }
 [ -z "${vwpt+x}" ] || { vwp=yes; vmag=yes; }
@@ -72,6 +100,11 @@ echo "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 hostname=$(uname -a | awk '{print $2}')
 op=$(cat /etc/redhat-release 2>/dev/null || cat /etc/os-release 2>/dev/null | grep -i pretty_name | cut -d \" -f2)
 [ -z "$(systemd-detect-virt 2>/dev/null)" ] && vi=$(virt-what 2>/dev/null) || vi=$(systemd-detect-virt 2>/dev/null)
+if [ "$OS" = "FreeBSD" ] && [ -n "$argo" ]; then
+echo "错误：原版 Argosbx 的 Cloudflared Argo 使用 Linux 二进制，当前补丁版暂不在 FreeBSD 启用 Argo。"
+echo "请在 FreeBSD 上使用 Xray 协议变量（例如 xcp / xhp / vxp / vwp / vlp）。"
+exit 1
+fi
 case $(uname -m) in
 arm64|aarch64) cpu=arm64;;
 amd64|x86_64) cpu=amd64;;
@@ -166,12 +199,49 @@ case "$warp" in *x6*) xryx='ForceIPv6' ;; *x*) xryx='ForceIPv4v6' ;; *) xryx='Fo
 fi
 }
 upxray(){
-url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/xray-$cpu"; out="$HOME/agsbx/xray"; (command -v curl >/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
+if [ "$FREEBSD" = yes ]; then
+    url="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-freebsd-64.zip"
+    zipfile="$HOME/agsbx/xray-freebsd.zip"
+    out="$HOME/agsbx/xray"
+    echo "检测到 FreeBSD，下载原生 FreeBSD amd64 Xray 内核……"
+    if command -v curl >/dev/null 2>&1; then
+        curl -Lo "$zipfile" -# --retry 2 "$url"
+    elif command -v fetch >/dev/null 2>&1; then
+        fetch -o "$zipfile" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$zipfile" "$url"
+    else
+        echo "错误：找不到 curl/fetch/wget，无法下载 Xray"
+        return 1
+    fi
+    if ! command -v unzip >/dev/null 2>&1; then
+        echo "错误：FreeBSD 环境缺少 unzip，无法解压 Xray-freebsd-64.zip"
+        return 1
+    fi
+    unzip -p "$zipfile" xray > "$out" || {
+        echo "错误：Xray FreeBSD 压缩包解压失败"
+        rm -f "$zipfile"
+        return 1
+    }
+    rm -f "$zipfile"
+else
+    url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/xray-$cpu"
+    out="$HOME/agsbx/xray"
+    (command -v curl >/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
+fi
 chmod +x "$HOME/agsbx/xray"
 sbcore=$("$HOME/agsbx/xray" version 2>/dev/null | awk '/^Xray/{print $2}')
+if [ -z "$sbcore" ]; then
+    echo "错误：Xray 内核无法执行，请检查系统架构或 FreeBSD 二进制文件"
+    return 1
+fi
 echo "已安装Xray正式版内核：$sbcore"
 }
 upsingbox(){
+if [ "$FREEBSD" = yes ]; then
+    echo "错误：当前 Argosbx 下载逻辑没有 FreeBSD 原生 Sing-box 内核，FreeBSD 请使用 Xray 协议方案。"
+    return 1
+fi
 url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/sing-box-$cpu"; out="$HOME/agsbx/sing-box"; (command -v curl>/dev/null 2>&1 && curl -Lo "$out" -# --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -O "$out" --tries=2 "$url")
 chmod +x "$HOME/agsbx/sing-box"
 sbcore=$("$HOME/agsbx/sing-box" version 2>/dev/null | awk '/version/{print $NF}')
@@ -216,7 +286,7 @@ if [ ! -e "$HOME/agsbx/xrk/private_key" ]; then
 key_pair=$("$HOME/agsbx/xray" x25519)
 private_key=$(echo "$key_pair" | awk -F':' '/PrivateKey/ {print $2}' | xargs)
 public_key=$(echo "$key_pair" | awk -F':' '/Password/ {print $2}' | xargs)
-short_id=$(date +%s%N | sha256sum | cut -c 1-8)
+short_id=$(date +%s%N | sha256_cmd | cut -c 1-8)
 echo "$private_key" > "$HOME/agsbx/xrk/private_key"
 echo "$public_key" > "$HOME/agsbx/xrk/public_key"
 echo "$short_id" > "$HOME/agsbx/xrk/short_id"
@@ -240,7 +310,7 @@ fi
 if [ -n "$xhp" ]; then
 xhp=xhpt
 if [ -z "$port_xh" ] && [ ! -e "$HOME/agsbx/port_xh" ]; then
-port_xh=$(shuf -i 10000-65535 -n 1)
+port_xh=$(rand_port)
 echo "$port_xh" > "$HOME/agsbx/port_xh"
 elif [ -n "$port_xh" ]; then
 echo "$port_xh" > "$HOME/agsbx/port_xh"
@@ -293,7 +363,7 @@ fi
 if [ -n "$vxp" ]; then
 vxp=vxpt
 if [ -z "$port_vx" ] && [ ! -e "$HOME/agsbx/port_vx" ]; then
-port_vx=$(shuf -i 10000-65535 -n 1)
+port_vx=$(rand_port)
 echo "$port_vx" > "$HOME/agsbx/port_vx"
 elif [ -n "$port_vx" ]; then
 echo "$port_vx" > "$HOME/agsbx/port_vx"
@@ -340,7 +410,7 @@ fi
 if [ -n "$xup" ]; then
 xup=xupt
 if [ -z "$port_xu" ] && [ ! -e "$HOME/agsbx/port_xu" ]; then
-port_xu=$(shuf -i 10000-65535 -n 1)
+port_xu=$(rand_port)
 echo "$port_xu" > "$HOME/agsbx/port_xu"
 elif [ -n "$port_xu" ]; then
 echo "$port_xu" > "$HOME/agsbx/port_xu"
@@ -395,7 +465,7 @@ fi
 if [ -n "$xcp" ]; then
 xcp=xcpt
 if [ -z "$port_xc" ] && [ ! -e "$HOME/agsbx/port_xc" ]; then
-port_xc=$(shuf -i 10000-65535 -n 1)
+port_xc=$(rand_port)
 echo "$port_xc" > "$HOME/agsbx/port_xc"
 elif [ -n "$port_xc" ]; then
 echo "$port_xc" > "$HOME/agsbx/port_xc"
@@ -450,7 +520,7 @@ fi
 if [ -n "$vwp" ]; then
 vwp=vwpt
 if [ -z "$port_vw" ] && [ ! -e "$HOME/agsbx/port_vw" ]; then
-port_vw=$(shuf -i 10000-65535 -n 1)
+port_vw=$(rand_port)
 echo "$port_vw" > "$HOME/agsbx/port_vw"
 elif [ -n "$port_vw" ]; then
 echo "$port_vw" > "$HOME/agsbx/port_vw"
@@ -495,7 +565,7 @@ fi
 if [ -n "$vlp" ]; then
 vlp=vlpt
 if [ -z "$port_vl_re" ] && [ ! -e "$HOME/agsbx/port_vl_re" ]; then
-port_vl_re=$(shuf -i 10000-65535 -n 1)
+port_vl_re=$(rand_port)
 echo "$port_vl_re" > "$HOME/agsbx/port_vl_re"
 elif [ -n "$port_vl_re" ]; then
 echo "$port_vl_re" > "$HOME/agsbx/port_vl_re"
@@ -561,7 +631,7 @@ insuuid
 if [ -s "/root/ygkkkca/private.key" ] && [ -n "$nvp" ]; then
 nvp=nvpt
 if [ -z "$port_nv" ] && [ ! -e "$HOME/agsbx/port_nv" ]; then
-port_nv=$(shuf -i 10000-65535 -n 1)
+port_nv=$(rand_port)
 echo "$port_nv" > "$HOME/agsbx/port_nv"
 elif [ -n "$port_nv" ]; then
 echo "$port_nv" > "$HOME/agsbx/port_nv"
@@ -594,7 +664,7 @@ fi
 if [ -n "$tup" ]; then
 tup=tupt
 if [ -z "$port_tu" ] && [ ! -e "$HOME/agsbx/port_tu" ]; then
-port_tu=$(shuf -i 10000-65535 -n 1)
+port_tu=$(rand_port)
 echo "$port_tu" > "$HOME/agsbx/port_tu"
 elif [ -n "$port_tu" ]; then
 echo "$port_tu" > "$HOME/agsbx/port_tu"
@@ -630,7 +700,7 @@ fi
 if [ -n "$anp" ]; then
 anp=anpt
 if [ -z "$port_an" ] && [ ! -e "$HOME/agsbx/port_an" ]; then
-port_an=$(shuf -i 10000-65535 -n 1)
+port_an=$(rand_port)
 echo "$port_an" > "$HOME/agsbx/port_an"
 elif [ -n "$port_an" ]; then
 echo "$port_an" > "$HOME/agsbx/port_an"
@@ -680,7 +750,7 @@ private_key_s=$(cat "$HOME/agsbx/sbk/private_key")
 public_key_s=$(cat "$HOME/agsbx/sbk/public_key")
 short_id_s=$(cat "$HOME/agsbx/sbk/short_id")
 if [ -z "$port_ar" ] && [ ! -e "$HOME/agsbx/port_ar" ]; then
-port_ar=$(shuf -i 10000-65535 -n 1)
+port_ar=$(rand_port)
 echo "$port_ar" > "$HOME/agsbx/port_ar"
 elif [ -n "$port_ar" ]; then
 echo "$port_ar" > "$HOME/agsbx/port_ar"
@@ -724,7 +794,7 @@ sskey=$("$HOME/agsbx/sing-box" generate rand 16 --base64)
 echo "$sskey" > "$HOME/agsbx/sskey"
 fi
 if [ -z "$port_ss" ] && [ ! -e "$HOME/agsbx/port_ss" ]; then
-port_ss=$(shuf -i 10000-65535 -n 1)
+port_ss=$(rand_port)
 echo "$port_ss" > "$HOME/agsbx/port_ss"
 elif [ -n "$port_ss" ]; then
 echo "$port_ss" > "$HOME/agsbx/port_ss"
@@ -751,7 +821,7 @@ xrsbhy2(){
 if [ -n "$hyp" ]; then
 hyp=hypt
 if [ -z "$port_hy2" ] && [ ! -e "$HOME/agsbx/port_hy2" ]; then
-port_hy2=$(shuf -i 10000-65535 -n 1)
+port_hy2=$(rand_port)
 echo "$port_hy2" > "$HOME/agsbx/port_hy2"
 elif [ -n "$port_hy2" ]; then
 echo "$port_hy2" > "$HOME/agsbx/port_hy2"
@@ -827,7 +897,7 @@ xrsbvm(){
 if [ -n "$vmp" ]; then
 vmp=vmpt
 if [ -z "$port_vm_ws" ] && [ ! -e "$HOME/agsbx/port_vm_ws" ]; then
-port_vm_ws=$(shuf -i 10000-65535 -n 1)
+port_vm_ws=$(rand_port)
 echo "$port_vm_ws" > "$HOME/agsbx/port_vm_ws"
 elif [ -n "$port_vm_ws" ]; then
 echo "$port_vm_ws" > "$HOME/agsbx/port_vm_ws"
@@ -897,7 +967,7 @@ xrsbso(){
 if [ -n "$sop" ]; then
 sop=sopt
 if [ -z "$port_so" ] && [ ! -e "$HOME/agsbx/port_so" ]; then
-port_so=$(shuf -i 10000-65535 -n 1)
+port_so=$(rand_port)
 echo "$port_so" > "$HOME/agsbx/port_so"
 elif [ -n "$port_so" ]; then
 echo "$port_so" > "$HOME/agsbx/port_so"
@@ -951,7 +1021,7 @@ fi
 
 xrsbout(){
 if [ -e "$HOME/agsbx/xr.json" ]; then
-sed -i '${s/,\s*$//}' "$HOME/agsbx/xr.json"
+sed_i '${s/,\s*$//}' "$HOME/agsbx/xr.json"
 cat >> "$HOME/agsbx/xr.json" <<EOF
   ],
   "outbounds": [
@@ -1054,7 +1124,7 @@ nohup "$HOME/agsbx/xray" run -c "$HOME/agsbx/xr.json" >/dev/null 2>&1 &
 fi
 fi
 if [ -e "$HOME/agsbx/sb.json" ]; then
-sed -i '${s/,\s*$//}' "$HOME/agsbx/sb.json"
+sed_i '${s/,\s*$//}' "$HOME/agsbx/sb.json"
 cat >> "$HOME/agsbx/sb.json" <<EOF
   ],
   "outbounds": [
@@ -1242,7 +1312,7 @@ sleep 5
 echo
 if find /proc/*/exe -type l 2>/dev/null | grep -E '/proc/[0-9]+/exe' | xargs -r readlink 2>/dev/null | grep -Eq 'agsbx/(s|x)' || pgrep -f 'agsbx/(s|x)' >/dev/null 2>&1 ; then
 [ -f ~/.bashrc ] || touch ~/.bashrc
-sed -i '/agsbx/d' ~/.bashrc
+sed_i '/agsbx/d' ~/.bashrc
 SCRIPT_PATH="$HOME/bin/agsbx"
 mkdir -p "$HOME/bin"
 (command -v curl >/dev/null 2>&1 && curl -sL "$agsbxurl" -o "$SCRIPT_PATH") || (command -v wget >/dev/null 2>&1 && wget -qO "$SCRIPT_PATH" "$agsbxurl")
@@ -1250,14 +1320,14 @@ chmod +x "$SCRIPT_PATH"
 if ! pidof systemd >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
 echo "if ! find /proc/*/exe -type l 2>/dev/null | grep -E '/proc/[0-9]+/exe' | xargs -r readlink 2>/dev/null | grep -Eq 'agsbx/(s|x)' && ! pgrep -f 'agsbx/(s|x)' >/dev/null 2>&1; then echo '检测到系统可能中断过，或者变量格式错误？建议在SSH对话框输入 reboot 重启下服务器。现在自动执行Argosbx脚本的节点恢复操作，请稍等……'; sleep 6; export alns=\"${alns}\" cfip=\"${cfip}\" hyjpt=\"${hyjpt}\" cdnym=\"${cdnym}\" name=\"${name}\" ippz=\"${ippz}\" argo=\"${argo}\" uuid=\"${uuid}\" $wap=\"${warp}\" $xhp=\"${port_xh}\" $xup=\"${port_xu}\" $vxp=\"${port_vx}\" $ssp=\"${port_ss}\" $sop=\"${port_so}\" $anp=\"${port_an}\" $arp=\"${port_ar}\" $vlp=\"${port_vl_re}\" $vwp=\"${port_vw}\" $vmp=\"${port_vm_ws}\" $hyp=\"${port_hy2}\" $tup=\"${port_tu}\" $xcp=\"${port_xc}\" $nvp=\"${port_nv}\" reym=\"${ym_vl_re}\" agn=\"${ARGO_DOMAIN}\" agk=\"${ARGO_AUTH}\"; bash "$HOME/bin/agsbx"; fi" >> ~/.bashrc
 fi
-sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' ~/.bashrc
+sed_i '/export PATH="\$HOME\/bin:\$PATH"/d' ~/.bashrc
 echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
 grep -qxF 'source ~/.bashrc' ~/.bash_profile 2>/dev/null || echo 'source ~/.bashrc' >> ~/.bash_profile
 . ~/.bashrc 2>/dev/null
 crontab -l > /tmp/crontab.tmp 2>/dev/null
 if ! pidof systemd >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
-sed -i '/agsbx\/sing-box/d' /tmp/crontab.tmp
-sed -i '/agsbx\/xray/d' /tmp/crontab.tmp
+sed_i '/agsbx\/sing-box/d' /tmp/crontab.tmp
+sed_i '/agsbx\/xray/d' /tmp/crontab.tmp
 if find /proc/*/exe -type l 2>/dev/null | grep -E '/proc/[0-9]+/exe' | xargs -r readlink 2>/dev/null | grep -q 'agsbx/s' || pgrep -f 'agsbx/s' >/dev/null 2>&1 ; then
 echo '@reboot sleep 10 && /bin/sh -c "nohup $HOME/agsbx/sing-box run -c $HOME/agsbx/sb.json >/dev/null 2>&1 &"' >> /tmp/crontab.tmp
 fi
@@ -1265,7 +1335,7 @@ if find /proc/*/exe -type l 2>/dev/null | grep -E '/proc/[0-9]+/exe' | xargs -r 
 echo '@reboot sleep 10 && /bin/sh -c "nohup $HOME/agsbx/xray run -c $HOME/agsbx/xr.json >/dev/null 2>&1 &"' >> /tmp/crontab.tmp
 fi
 fi
-sed -i '/agsbx\/cloudflared/d' /tmp/crontab.tmp
+sed_i '/agsbx\/cloudflared/d' /tmp/crontab.tmp
 if [ -n "$argo" ] && [ -n "$vmag" ]; then
 if [ -n "${ARGO_DOMAIN}" ] && [ -n "${ARGO_AUTH}" ]; then
 if ! pidof systemd >/dev/null 2>&1 && ! command -v rc-service >/dev/null 2>&1; then
@@ -2498,14 +2568,14 @@ showmode
 cleandel(){
 for P in /proc/[0-9]*; do if [ -L "$P/exe" ]; then TARGET=$(readlink -f "$P/exe" 2>/dev/null); if echo "$TARGET" | grep -qE '/agsbx/c|/agsbx/s|/agsbx/x'; then PID=$(basename "$P"); kill "$PID" 2>/dev/null; fi; fi; done
 kill -15 $(pgrep -f 'agsbx/s' 2>/dev/null) $(pgrep -f 'agsbx/c' 2>/dev/null) $(pgrep -f 'agsbx/x' 2>/dev/null) $(pgrep -f 'websbx' 2>/dev/null) >/dev/null 2>&1
-sed -i '/agsbx/d' ~/.bashrc
-sed -i '/export PATH="\$HOME\/bin:\$PATH"/d' ~/.bashrc
+sed_i '/agsbx/d' ~/.bashrc
+sed_i '/export PATH="\$HOME\/bin:\$PATH"/d' ~/.bashrc
 . ~/.bashrc 2>/dev/null
 crontab -l > /tmp/crontab.tmp 2>/dev/null
-sed -i '/agsbx\/sing-box/d' /tmp/crontab.tmp
-sed -i '/agsbx\/xray/d' /tmp/crontab.tmp
-sed -i '/agsbx\/cloudflared/d' /tmp/crontab.tmp
-sed -i '/websbx/d' /tmp/crontab.tmp
+sed_i '/agsbx\/sing-box/d' /tmp/crontab.tmp
+sed_i '/agsbx\/xray/d' /tmp/crontab.tmp
+sed_i '/agsbx\/cloudflared/d' /tmp/crontab.tmp
+sed_i '/websbx/d' /tmp/crontab.tmp
 crontab /tmp/crontab.tmp >/dev/null 2>&1
 rm /tmp/crontab.tmp
 rm -rf  "$HOME/bin/agsbx"
@@ -2641,7 +2711,7 @@ command -v openssl >/dev/null 2>&1 && openssl req -new -x509 -days 36500 -key "$
 #url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/cert.crt"; out="$HOME/agsbx/cert.crt"; (command -v curl>/dev/null 2>&1 && curl -Ls -o "$out" --retry 2 "$url") || (command -v wget>/dev/null 2>&1 && timeout 3 wget -q -O "$out" --tries=2 "$url")
 #echo "fc6dca8cfc4081102aa9655d0d4805c27d7266f605541d242ad66ad00a284a35" > "$HOME/agsbx/SHA256.txt"
 #else
-SHA256=$(openssl x509 -in $HOME/agsbx/cert.crt -outform DER | sha256sum | awk '{print $1}')
+SHA256=$(openssl x509 -in $HOME/agsbx/cert.crt -outform DER | sha256_cmd | awk '{print $1}')
 echo "$SHA256" > "$HOME/agsbx/SHA256.txt"
 fi
 #fi
@@ -2674,7 +2744,7 @@ if [ -z "$subpt" ]; then
 if [ -n "$(cat "$HOME/agsbx/subport.log" 2>/dev/null)" ]; then
 subport=$(cat $HOME/agsbx/subport.log)
 else
-subport=$(shuf -i 10000-65535 -n 1)
+subport=$(rand_port)
 fi
 else
 subport="$subpt"
@@ -2704,7 +2774,7 @@ chmod +x /etc/local.d/alpinesubsbx.start
 rc-update add local default >/dev/null 2>&1
 else
 crontab -l 2>/dev/null > /tmp/crontab.tmp
-sed -i '/websbx/d' /tmp/crontab.tmp
+sed_i '/websbx/d' /tmp/crontab.tmp
 echo '@reboot sleep 10 && /bin/bash -c "busybox httpd -f -p $(cat $HOME/agsbx/subport.log 2>/dev/null) -h $HOME/websbx > /dev/null 2>&1 &"' >> /tmp/crontab.tmp
 crontab /tmp/crontab.tmp >/dev/null 2>&1
 rm /tmp/crontab.tmp
