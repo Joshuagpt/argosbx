@@ -77,7 +77,7 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
     }
     serv00_port_add(){
         local p="$1"
-        devil port add tcp "$p" argosbx-xhttp >/dev/null 2>&1
+        devil port add "$p" tcp argosbx-xhttp >/dev/null 2>&1
     }
     serv00_port_del(){
         local p="$1" t
@@ -97,6 +97,7 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
         fi
         if [ -z "$replacement" ]; then
             echo "没有现有 TCP 端口可直接替换。"
+            echo "如果选择 UDP 端口，它也会被删除，请确认该 UDP 端口没有其他服务使用。"
             serv00_show_ports
             printf "请输入要删除的现有端口："
             read -r replacement
@@ -106,8 +107,13 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
             echo "端口 $replacement 不在当前 Serv00 保留列表中。"
             return 1
         }
+        local replacement_type
+        replacement_type=$(serv00_port_type "$replacement")
         echo
-        echo "将删除现有端口 $replacement，并尝试保留新的 XHTTP TCP 端口。"
+        echo "将删除现有端口 $replacement ($replacement_type)，并尝试保留新的 XHTTP TCP 端口。"
+        if [ "$replacement_type" = "udp" ]; then
+            echo "警告：$replacement 是 UDP 端口，删除后可能影响你现有的 UDP 服务。"
+        fi
         printf "确认删除端口 $replacement？[y/N]："
         read -r answer
         case "$answer" in
@@ -209,7 +215,7 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
                     return
                 fi
             done
-            serv00_die "删除旧端口后仍无法保留新的 XHTTP TCP 端口。"
+            serv00_die "删除旧端口后仍无法保留新的 XHTTP TCP 端口。请先手动执行：devil port list；然后测试 devil port add 2053 tcp argosbx-xhttp。"
         fi
         port_xc="$p"
         echo "$p" > "$SERV00_PORT"
