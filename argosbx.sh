@@ -63,31 +63,106 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
     SERV00_PID="$SERV00_DIR/xray.pid"
     SERV00_SYNC="$SERV00_DIR/cert-sync.sh"
     SERV00_RUNTIME_URL="https://github.com/Joshuagpt/Go_Real/releases/download/v1/runtime"
-    SERV00_PORTS="443 2053 2083 2087 2096 8443"
+    SERV00_PORTS="2053 2083 2087 2096 8443"
 
     serv00_die(){ echo "错误：$*"; exit 1; }
     serv00_need(){ command -v "$1" >/dev/null 2>&1 || serv00_die "缺少命令：$1"; }
     serv00_port_exists(){
         local p="$1"
-        devil port list 2>/dev/null | grep -Eiq "(^|[[:space:]])${p}([[:space:]]|$).*tcp|(^|[[:space:]])tcp([[:space:]]|$).*${p}([[:space:]]|$)"
+        devil port list 2>/dev/null | awk -v p="$p" 'tolower($1)==p && tolower($2)=="tcp"{found=1} END{exit !found}'
+    }
+    serv00_port_type(){
+        local p="$1"
+        devil port list 2>/dev/null | awk -v p="$p" 'tolower($1)==p{print tolower($2); exit}'
+    }
+    serv00_port_add(){
+        local p="$1"
+        devil port add tcp "$p" argosbx-xhttp >/dev/null 2>&1
+    }
+    serv00_port_del(){
+        local p="$1" t
+        t=$(serv00_port_type "$p")
+        [ -n "$t" ] || return 1
+        devil port del "$t" "$p" >/dev/null 2>&1
+    }
+    serv00_show_ports(){
+        echo "当前 Serv00 端口："
+        devil port list 2>/dev/null || true
+    }
+    serv00_choose_replacement_port(){
+        local preferred="$1" replacement answer
+        replacement="$preferred"
+        if [ -z "$replacement" ]; then
+            replacement=$(devil port list 2>/dev/null | awk 'tolower($2)=="tcp"{print $1; exit}')
+        fi
+        if [ -z "$replacement" ]; then
+            echo "没有现有 TCP 端口可直接替换。"
+            serv00_show_ports
+            printf "请输入要删除的现有端口："
+            read -r replacement
+        fi
+        [ -n "$replacement" ] || return 1
+        serv00_port_type "$replacement" >/dev/null || {
+            echo "端口 $replacement 不在当前 Serv00 保留列表中。"
+            return 1
+        }
+        echo
+        echo "将删除现有端口 $replacement，并尝试保留新的 XHTTP TCP 端口。"
+        printf "确认删除端口 $replacement？[y/N]："
+        read -r answer
+        case "$answer" in
+            y|Y|yes|YES)
+                serv00_port_del "$replacement" || {
+                    echo "无法删除端口 $replacement。"
+                    return 1
+                }
+                echo "已删除端口 $replacement。"
+                return 0
+                ;;
+            *)
+                echo "已取消端口调整。"
+                return 1
+                ;;
+        esac
     }
     serv00_reserve_port(){
-        local p
+        local p replacement
+
         if [ -n "$port_xc" ]; then
             case "$port_xc" in
-                443|2053|2083|2087|2096|8443) ;;
+                2053|2083|2087|2096|8443) ;;
+                443) serv00_die "Serv00 普通端口不能保留 443，请使用 2053/2083/2087/2096/8443。" ;;
                 *) echo "提示：自定义端口 $port_xc 不是 Cloudflare 常用 HTTPS 端口。" ;;
             esac
-            if ! serv00_port_exists "$port_xc"; then
-                devil port add "$port_xc" TCP argosbx-xhttp >/dev/null 2>&1 || serv00_die "无法保留 TCP 端口 $port_xc，请检查 devil port list。"
+            if serv00_port_exists "$port_xc"; then
+                echo "$port_xc" > "$SERV00_PORT"
+                return
             fi
+            if serv00_port_add "$port_xc"; then
+                serv00_port_exists "$port_xc" || serv00_die "端口 $port_xc 添加命令成功，但在 devil port list 中没有找到。"
+                echo "$port_xc" > "$SERV00_PORT"
+                return
+            fi
+            echo "端口 $port_xc 尚未保留，而且当前端口数量可能已达到 Serv00 限制。"
+            serv00_show_ports
+            printf "是否删除一个现有端口后重新保留 $port_xc？[y/N]："
+            read -r answer
+            case "$answer" in
+                y|Y|yes|YES) ;;
+                *) serv00_die "没有保留端口 $port_xc。请手动调整 Serv00 端口后重新运行。" ;;
+            esac
+            replacement=$(devil port list 2>/dev/null | awk 'tolower($2)=="tcp"{print $1; exit}')
+            serv00_choose_replacement_port "$replacement" || serv00_die "端口调整已取消。"
+            serv00_port_add "$port_xc" || serv00_die "删除旧端口后仍无法保留 TCP 端口 $port_xc。"
             echo "$port_xc" > "$SERV00_PORT"
             return
         fi
+
         if [ -s "$SERV00_PORT" ]; then
             port_xc=$(cat "$SERV00_PORT")
             if serv00_port_exists "$port_xc"; then return; fi
         fi
+
         for p in $SERV00_PORTS; do
             if serv00_port_exists "$p"; then
                 port_xc="$p"
@@ -95,22 +170,49 @@ if [ "$(uname -s 2>/dev/null)" = "FreeBSD" ]; then
                 return
             fi
         done
+
         for p in $SERV00_PORTS; do
-            if devil port add "$p" TCP argosbx-xhttp >/dev/null 2>&1; then
+            if serv00_port_add "$p" && serv00_port_exists "$p"; then
                 port_xc="$p"
                 echo "$p" > "$SERV00_PORT"
                 return
             fi
         done
-        echo "无法自动保留 443/2053/2083/2087/2096/8443。"
-        echo "当前 Serv00 端口："
-        devil port list 2>/dev/null || true
+
+        echo "没有检测到可直接使用的 Cloudflare HTTPS TCP 端口。"
+        serv00_show_ports
         echo
-        printf "请输入一个已由 Serv00 分配的 TCP 端口："
-        read -r port_xc
-        [ -n "$port_xc" ] || serv00_die "未提供 TCP 端口。"
-        serv00_port_exists "$port_xc" || serv00_die "端口 $port_xc 不在你的 TCP 保留端口中。"
-        echo "$port_xc" > "$SERV00_PORT"
+        echo "Serv00 端口数量已满时，可以通过 devil 删除一个现有端口，再添加新的 XHTTP 端口。"
+        printf "是否把一个现有端口替换为 2053？[y/N]："
+        read -r answer
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *)
+                printf "请输入一个已经保留的 TCP 端口直接使用："
+                read -r port_xc
+                [ -n "$port_xc" ] || serv00_die "未提供 TCP 端口。"
+                serv00_port_exists "$port_xc" || serv00_die "端口 $port_xc 不在你的 TCP 保留端口中。"
+                echo "$port_xc" > "$SERV00_PORT"
+                return
+                ;;
+        esac
+
+        replacement=$(devil port list 2>/dev/null | awk 'tolower($2)=="tcp"{print $1; exit}')
+        serv00_choose_replacement_port "$replacement" || serv00_die "端口调整已取消。"
+        p=2053
+        if ! serv00_port_add "$p" || ! serv00_port_exists "$p"; then
+            echo "无法保留 2053，尝试其他 Cloudflare HTTPS 端口。"
+            for p in $SERV00_PORTS; do
+                if serv00_port_add "$p" && serv00_port_exists "$p"; then
+                    port_xc="$p"
+                    echo "$p" > "$SERV00_PORT"
+                    return
+                fi
+            done
+            serv00_die "删除旧端口后仍无法保留新的 XHTTP TCP 端口。"
+        fi
+        port_xc="$p"
+        echo "$p" > "$SERV00_PORT"
     }
     serv00_get_ip(){
         local ip
